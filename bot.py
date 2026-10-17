@@ -18,8 +18,8 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 # ====================== НАСТРОЙКИ ======================
 TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВЬ_СЮДА_ТОКЕН"
 
-TEACHERS = {"elenaedvlasova"}
-ADMINS = {"l1xxoff"}
+TEACHERS = {"username_учителя"}
+ADMINS = {"username_админа"}
 
 KGD_TZ = timezone(timedelta(hours=2))
 
@@ -98,6 +98,54 @@ def get_all_users():
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
+
+
+def get_users_detailed():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute(
+        "SELECT user_id, username, first_name, added_at FROM users ORDER BY added_at ASC"
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+# NEW: обновить username и first_name у всех пользователей через Telegram API
+async def refresh_usernames() -> tuple[int, int]:
+    """Возвращает (обновлено, ошибок)."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    user_ids = [row[0] for row in c.fetchall()]
+    conn.close()
+
+    updated = 0
+    errors = 0
+
+    for uid in user_ids:
+        try:
+            chat = await bot.get_chat(uid)
+            new_username = chat.username
+            new_first_name = chat.first_name
+
+            conn = get_connection()
+            c = conn.cursor()
+            c.execute(
+                "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
+                (new_username, new_first_name, uid),
+            )
+            conn.commit()
+            conn.close()
+            updated += 1
+        except (TelegramForbiddenError, TelegramBadRequest):
+            errors += 1
+        except Exception:
+            errors += 1
+
+        await asyncio.sleep(0.05)
+
+    return updated, errors
 
 
 def save_message(user_id: int, username: str | None, name: str | None, text: str) -> int:
@@ -385,6 +433,7 @@ def diagnostic_menu() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="▶️ Старт")],
         [KeyboardButton(text="🔄 Обновление")],
         [KeyboardButton(text="📢 Рассылка")],
+        [KeyboardButton(text="👥 Пользователи")],
         [KeyboardButton(text="⏹ Конец")],
         [KeyboardButton(text="🔙 Назад")],
     ]
@@ -447,6 +496,24 @@ def message_open_keyboard(msg_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="🔙 К сообщениям", callback_data="messages_list"
+                )
+            ],
+        ]
+    )
+
+
+# NEW: клавиатура под списком пользователей
+def users_list_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить ники", callback_data="users_refresh"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад", callback_data="diag_back"
                 )
             ],
         ]
@@ -1318,6 +1385,135 @@ async def diag_custom_send(message: types.Message, state: FSMContext):
         reply_markup=diagnostic_menu(),
     )
     await state.clear()
+
+
+# ---------- Пользователи (админ) ----------
+@dp.message(F.text == "👥 Пользователи")
+async def diag_users(message: types.Message, state: FSMContext):
+    role = get_role(message.from_user.username)
+    if role != "admin":
+        return
+    await state.clear()
+
+    users = get_users_detailed()
+    if not users:
+        await message.answer(
+            "Пока никто не заходил в бота.",
+            reply_markup=diagnostic_menu(),
+        )
+        return
+
+    lines = [f"👥 <b>Пользователи бота ({len(users)})</b>\n"]
+
+    for user_id, username, first_name, added_at in users:
+        if username:
+            uname = f"@{username}"
+        else:
+            uname = f"id{user_id} (без username)"
+
+        name = first_name or "—"
+
+        user_role = get_role(username)
+        role_icon = {
+            "admin": "🛠",
+            "teacher": "👨‍🏫",
+            "student": "🎓",
+        }.get(user_role, "❔")
+
+        date_str = format_datetime(added_at)
+
+        lines.append(f"{role_icon} <b>{uname}</b> — {name}")
+        lines.append(f"   <i>{date_str}</i>")
+
+    text = "\n".join(lines)
+
+    if len(text) <= 4000:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=users_list_keyboard(),
+        )
+    else:
+        await send_long_message(message, text, reply_markup=users_list_keyboard())
+
+
+@dp.callback_query(F.data == "users_refresh")
+async def users_refresh_handler(callback: types.CallbackQuery):
+    role = get_role(callback.from_user.username)
+    if role != "admin":
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.answer("Обновляю ники…")
+    await callback.message.edit_text(
+        "🔄 Обновляю ники через Telegram…\nЭто может занять несколько секунд."
+    )
+
+    updated, errors = await refresh_usernames()
+
+    users = get_users_detailed()
+    lines = [f"👥 <b>Пользователи бота ({len(users)})</b>\n"]
+    lines.append(
+        f"<i>Обновлено: {updated}, ошибок: {errors}</i>\n"
+    )
+
+    for user_id, username, first_name, added_at in users:
+        if username:
+            uname = f"@{username}"
+        else:
+            uname = f"id{user_id} (без username)"
+
+        name = first_name or "—"
+
+        user_role = get_role(username)
+        role_icon = {
+            "admin": "🛠",
+            "teacher": "👨‍🏫",
+            "student": "🎓",
+        }.get(user_role, "❔")
+
+        date_str = format_datetime(added_at)
+
+        lines.append(f"{role_icon} <b>{uname}</b> — {name}")
+        lines.append(f"   <i>{date_str}</i>")
+
+    text = "\n".join(lines)
+
+    if len(text) <= 4000:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=users_list_keyboard(),
+        )
+    else:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await send_long_message(
+            callback.message,
+            text,
+            reply_markup=users_list_keyboard(),
+        )
+
+
+@dp.callback_query(F.data == "diag_back")
+async def diag_back(callback: types.CallbackQuery):
+    role = get_role(callback.from_user.username)
+    if role != "admin":
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "Меню диагностики:",
+        reply_markup=diagnostic_menu(),
+    )
+    await callback.answer()
 
 
 @dp.message(F.text == "⏹ Конец")
