@@ -18,8 +18,8 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 # ====================== НАСТРОЙКИ ======================
 TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВЬ_СЮДА_ТОКЕН"
 
-TEACHERS = {"l1xxoff"}
-ADMINS = {"@elenaedvlasova"}
+TEACHERS = {"elenaedvlasova"}
+ADMINS = {"l1xxoff"}
 
 KGD_TZ = timezone(timedelta(hours=2))
 
